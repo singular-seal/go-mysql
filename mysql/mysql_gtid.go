@@ -90,7 +90,9 @@ func (s IntervalSlice) Normalize() IntervalSlice {
 		return n
 	}
 
-	s.Sort()
+	if len(s) > 1 {
+		s.Sort()
+	}
 
 	n = append(n, s[0])
 
