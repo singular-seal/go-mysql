@@ -20,9 +20,14 @@ type DisruptorEvent struct {
 	err      error
 }
 
+type ClosableEventHandler interface {
+	Handle(*BinlogEvent) error
+	Close()
+}
+
 type DisruptorBinlogSyncer struct {
 	BinlogSyncer
-	OnEvent    OnEventFunc
+	Handler    ClosableEventHandler
 	disruptor  disruptor.Disruptor
 	ringBuffer []*DisruptorEvent
 }
@@ -31,117 +36,155 @@ type InitialParseStage struct {
 	syncer *DisruptorBinlogSyncer
 }
 type ConcurrentParseStage struct {
-	ringBuffer []*DisruptorEvent
+	num             int64
+	concurrencyMask int64
+	syncer          *DisruptorBinlogSyncer
 }
 type EventSinkStage struct {
-	ringBuffer []*DisruptorEvent
+	syncer   *DisruptorBinlogSyncer
+	hasError bool
 }
 
 func (st InitialParseStage) Consume(lower, upper int64) {
-	b := st.syncer
-	msg := b.ringBuffer[lower&DisruptorBufferMask]
-	//skip OK byte, 0x00
-	msg.data = msg.data[1:]
-
-	needACK := false
-	if st.syncer.cfg.SemiSyncEnabled && (msg.data[0] == SemiSyncIndicator) {
-		needACK = msg.data[1] == 0x01
-		//skip semi sync header
-		msg.data = msg.data[2:]
-	}
-
-	e, body, err := b.parser.QuickParse(msg.data)
-	if err != nil {
-		msg.err = errors.Trace(err)
-		return
-	}
-
-	if e.Header.LogPos > 0 {
-		// Some events like FormatDescriptionEvent return 0, ignore.
-		b.nextPos.Pos = e.Header.LogPos
-	}
+	syncer := st.syncer
 
 	getCurrentGtidSet := func() GTIDSet {
-		if b.currGset == nil {
+		if syncer.currGset == nil {
 			return nil
 		}
-		return b.currGset.Clone()
+		return syncer.currGset.Clone()
 	}
 
 	advanceCurrentGtidSet := func(gtid string) error {
 		// todo should remove this judgement and set currGset during startup
-		if b.currGset == nil {
-			b.currGset = b.prevGset.Clone()
+		if syncer.currGset == nil {
+			syncer.currGset = syncer.prevGset.Clone()
 		}
-		err := b.currGset.Update(gtid)
+		err := syncer.currGset.Update(gtid)
 		return err
 	}
 
-	switch event := e.Event.(type) {
-	case *RotateEvent:
-		b.nextPos.Name = string(event.NextLogName)
-		b.nextPos.Pos = uint32(event.Position)
-		b.cfg.Logger.Infof("rotate to %s", b.nextPos)
-	case *GTIDEvent:
-		if b.prevGset == nil {
-			break
+	for ; lower <= upper; lower++ {
+		msg := syncer.ringBuffer[lower&DisruptorBufferMask]
+		//skip OK byte, 0x00
+		msg.data = msg.data[1:]
+
+		needACK := false
+		if st.syncer.cfg.SemiSyncEnabled && (msg.data[0] == SemiSyncIndicator) {
+			needACK = msg.data[1] == 0x01
+			//skip semi sync header
+			msg.data = msg.data[2:]
 		}
-		u, _ := uuid.FromBytes(event.SID)
-		err := advanceCurrentGtidSet(fmt.Sprintf("%s:%d", u.String(), event.GNO))
+
+		e, body, err := syncer.parser.QuickParse(msg.data)
 		if err != nil {
 			msg.err = errors.Trace(err)
-			return
+			continue
 		}
-	case *MariadbGTIDEvent:
-		if b.prevGset == nil {
-			break
+
+		if e.Header.LogPos > 0 {
+			// Some events like FormatDescriptionEvent return 0, ignore.
+			syncer.nextPos.Pos = e.Header.LogPos
 		}
-		GTID := event.GTID
-		err := advanceCurrentGtidSet(fmt.Sprintf("%d-%d-%d", GTID.DomainID, GTID.ServerID, GTID.SequenceNumber))
-		if err != nil {
-			msg.err = errors.Trace(err)
-			return
+
+		switch event := e.Event.(type) {
+		case *RotateEvent:
+			syncer.nextPos.Name = string(event.NextLogName)
+			syncer.nextPos.Pos = uint32(event.Position)
+			syncer.cfg.Logger.Infof("rotate to %s", syncer.nextPos)
+		case *GTIDEvent:
+			if syncer.prevGset == nil {
+				break
+			}
+			u, _ := uuid.FromBytes(event.SID)
+			err := advanceCurrentGtidSet(fmt.Sprintf("%s:%d", u.String(), event.GNO))
+			if err != nil {
+				msg.err = errors.Trace(err)
+				continue
+			}
+		case *MariadbGTIDEvent:
+			if syncer.prevGset == nil {
+				break
+			}
+			GTID := event.GTID
+			err := advanceCurrentGtidSet(fmt.Sprintf("%d-%d-%d", GTID.DomainID, GTID.ServerID, GTID.SequenceNumber))
+			if err != nil {
+				msg.err = errors.Trace(err)
+				continue
+			}
+		case *XIDEvent:
+			event.GSet = getCurrentGtidSet()
+		case *QueryEvent:
+			event.GSet = getCurrentGtidSet()
 		}
-	case *XIDEvent:
-		event.GSet = getCurrentGtidSet()
-	case *QueryEvent:
-		event.GSet = getCurrentGtidSet()
-	}
 
-	needStop := false
-	select {
-	case <-b.ctx.Done():
-		needStop = true
-	}
-
-	if needACK {
-		err := b.replySemiSyncACK(b.nextPos)
-		if err != nil {
-			msg.err = errors.Trace(err)
-			return
+		needStop := false
+		select {
+		case <-syncer.ctx.Done():
+			needStop = true
 		}
+
+		if needACK {
+			err := syncer.replySemiSyncACK(syncer.nextPos)
+			if err != nil {
+				msg.err = errors.Trace(err)
+				continue
+			}
+		}
+
+		if needStop {
+			msg.err = errors.New("sync is been closing...")
+			continue
+		}
+
+		msg.binEvent = e
+		msg.data = body
 	}
-
-	if needStop {
-		msg.err = errors.New("sync is been closing...")
-		return
-	}
-
-	msg.binEvent = e
-	msg.data = body
-	return
-
 }
+
 func (st ConcurrentParseStage) Consume(lower, upper int64) {
-	
+	for ; lower <= upper; lower++ {
+		if lower&st.concurrencyMask != st.num {
+			continue
+		}
+		msg := st.syncer.ringBuffer[lower&DisruptorBufferMask]
+		if msg.err != nil {
+			continue
+		}
+		msg.err = st.syncer.parser.FullParse(msg.binEvent, msg.data)
+	}
 }
+
 func (st EventSinkStage) Consume(lower, upper int64) {
+	for ; lower <= upper; lower++ {
+		if st.hasError {
+			return
+		}
+
+		msg := st.syncer.ringBuffer[lower&DisruptorBufferMask]
+		if msg.err != nil {
+			st.handleError(msg.err)
+			return
+		}
+		err := st.syncer.Handler(msg)
+		if err != nil {
+			st.handleError(msg.err)
+			return
+		}
+	}
+}
+
+func (st EventSinkStage) handleError(err error) {
+	st.hasError = true
+	st.syncer.cfg.Logger.Errorf("get error, will exit", err)
+	st.syncer.Handler.Close()
+	st.syncer.Close()
 }
 
 func NewDisruptorBinlogSyncer(cfg BinlogSyncerConfig) *DisruptorBinlogSyncer {
 	return &DisruptorBinlogSyncer{
 		BinlogSyncer: *NewBinlogSyncer(cfg),
-		OnEvent:      nil,
+		Handler:      nil,
 		disruptor: disruptor.New(
 			disruptor.WithCapacity(DisruptorBufferSize),
 			disruptor.WithConsumerGroup(InitialParseStage{}),
@@ -176,6 +219,7 @@ func (bs *DisruptorBinlogSyncer) run() {
 			bs.parseEvent(data)
 		case ERR_HEADER:
 			err = bs.c.HandleErrorPacket(data)
+			bs.cfg.Logger.Error(err)
 			return
 		case EOF_HEADER:
 			// refer to https://dev.mysql.com/doc/internals/en/com-binlog-dump.html#binlog-dump-non-block

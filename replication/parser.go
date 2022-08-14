@@ -465,19 +465,19 @@ func (p *BinlogParser) QuickParse(data []byte) (*BinlogEvent, []byte, error) {
 }
 
 // FullParse Only used in multiple stages parsing, parse all data content and do crc32 checksum if necessary
-func (p *BinlogParser) FullParse(event *BinlogEvent, bodyData []byte) (*BinlogEvent, error) {
+func (p *BinlogParser) FullParse(event *BinlogEvent, bodyData []byte) error {
 	if p.format != nil && p.format.ChecksumAlgorithm == BINLOG_CHECKSUM_ALG_CRC32 {
 		err := p.verifyCrc32Checksum(event.RawData)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if bodyData == nil {
-		return event, nil
+		return nil
 	}
 	err := event.Event.Decode(bodyData)
-	return event, err
+	return err
 }
 
 func (p *BinlogParser) verifyCrc32Checksum(rawData []byte) error {
