@@ -345,6 +345,141 @@ func (p *BinlogParser) Parse(data []byte) (*BinlogEvent, error) {
 	return &BinlogEvent{RawData: rawData, Header: h, Event: e}, nil
 }
 
+// QuickParse Only used in multiple stages parsing, only parse header and some other structure information
+// and don't parse columns and don't do some other heavy staffs
+func (p *BinlogParser) QuickParse(data []byte) (*BinlogEvent, []byte, error) {
+	rawData := data
+
+	h, err := p.parseHeader(data)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	data = data[EventHeaderSize:]
+	eventLen := int(h.EventSize) - EventHeaderSize
+
+	if len(data) != eventLen {
+		return nil, nil, fmt.Errorf("invalid data size %d in event %s, less event length %d", len(data), h.EventType, eventLen)
+	}
+
+	var e Event
+	var skipDecode bool
+
+	if h.EventType == FORMAT_DESCRIPTION_EVENT {
+		p.format = &FormatDescriptionEvent{}
+		e = p.format
+	} else {
+		if p.format != nil && p.format.ChecksumAlgorithm == BINLOG_CHECKSUM_ALG_CRC32 {
+			data = data[0 : len(data)-BinlogChecksumLength]
+		}
+
+		if h.EventType == ROTATE_EVENT {
+			e = &RotateEvent{}
+		} else if !p.rawMode {
+			switch h.EventType {
+			case QUERY_EVENT:
+				e = &QueryEvent{}
+				skipDecode = true
+			case XID_EVENT:
+				e = &XIDEvent{}
+			case TABLE_MAP_EVENT:
+				te := &TableMapEvent{
+					flavor: p.flavor,
+				}
+				if p.format.EventTypeHeaderLengths[TABLE_MAP_EVENT-1] == 6 {
+					te.tableIDSize = 4
+				} else {
+					te.tableIDSize = 6
+				}
+				e = te
+			case WRITE_ROWS_EVENTv0,
+				UPDATE_ROWS_EVENTv0,
+				DELETE_ROWS_EVENTv0,
+				WRITE_ROWS_EVENTv1,
+				DELETE_ROWS_EVENTv1,
+				UPDATE_ROWS_EVENTv1,
+				WRITE_ROWS_EVENTv2,
+				UPDATE_ROWS_EVENTv2,
+				DELETE_ROWS_EVENTv2:
+				e = p.newRowsEvent(h)
+				skipDecode = true
+			case ROWS_QUERY_EVENT:
+				e = &RowsQueryEvent{}
+			case GTID_EVENT:
+				e = &GTIDEvent{}
+			case ANONYMOUS_GTID_EVENT:
+				e = &GTIDEvent{}
+			case BEGIN_LOAD_QUERY_EVENT:
+				e = &BeginLoadQueryEvent{}
+			case EXECUTE_LOAD_QUERY_EVENT:
+				e = &ExecuteLoadQueryEvent{}
+			case MARIADB_ANNOTATE_ROWS_EVENT:
+				e = &MariadbAnnotateRowsEvent{}
+			case MARIADB_BINLOG_CHECKPOINT_EVENT:
+				e = &MariadbBinlogCheckPointEvent{}
+			case MARIADB_GTID_LIST_EVENT:
+				e = &MariadbGTIDListEvent{}
+			case MARIADB_GTID_EVENT:
+				ee := &MariadbGTIDEvent{}
+				ee.GTID.ServerID = h.ServerID
+				e = ee
+			case PREVIOUS_GTIDS_EVENT:
+				e = &PreviousGTIDsEvent{}
+			case INTVAR_EVENT:
+				e = &IntVarEvent{}
+			default:
+				e = &GenericEvent{}
+			}
+		} else {
+			e = &GenericEvent{}
+		}
+	}
+
+	if !skipDecode {
+		if err = e.Decode(data); err != nil {
+			return nil, nil, &EventError{h, err.Error(), data}
+		}
+	}
+
+	if te, ok := e.(*TableMapEvent); ok {
+		p.tables[te.TableID] = te
+	}
+
+	if re, ok := e.(*RowsEvent); ok {
+		if (re.Flags & RowsEventStmtEndFlag) > 0 {
+			// Refer https://github.com/alibaba/canal/blob/38cc81b7dab29b51371096fb6763ca3a8432ffee/dbsync/src/main/java/com/taobao/tddl/dbsync/binlog/event/RowsLogEvent.java#L176
+			p.tables = make(map[uint64]*TableMapEvent)
+		}
+	}
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if !skipDecode {
+		return &BinlogEvent{RawData: rawData, Header: h, Event: e}, nil, nil
+	} else {
+		return &BinlogEvent{RawData: rawData, Header: h, Event: e}, data, nil
+	}
+}
+
+// FullParse Only used in multiple stages parsing, parse all data content and do crc32 checksum if necessary
+func (p *BinlogParser) FullParse(event *BinlogEvent, bodyData []byte) (*BinlogEvent, error) {
+	if p.format != nil && p.format.ChecksumAlgorithm == BINLOG_CHECKSUM_ALG_CRC32 {
+		err := p.verifyCrc32Checksum(event.RawData)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if bodyData == nil {
+		return event, nil
+	}
+	err := event.Event.Decode(bodyData)
+	return event, err
+}
+
 func (p *BinlogParser) verifyCrc32Checksum(rawData []byte) error {
 	if !p.verifyChecksum {
 		return nil
