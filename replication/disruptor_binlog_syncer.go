@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	DisruptorBufferSize   = 8192
-	DisruptorBufferMask   = DisruptorBufferSize - 1
-	DisruptorReservations = 1
+	DefaultDisruptorBufferSize = 8192
+	DefaultParseConcurrency    = 4
+	DisruptorBufferMask        = DefaultDisruptorBufferSize - 1
+	DisruptorReservations      = 1
 )
 
 type DisruptorEvent struct {
@@ -30,6 +31,12 @@ type DisruptorBinlogSyncer struct {
 	Handler    ClosableEventHandler
 	disruptor  disruptor.Disruptor
 	ringBuffer []*DisruptorEvent
+}
+
+type DisruptorBinlogSyncerConfig struct {
+	BinlogSyncerConfig
+	BufferSize       int
+	ParseConcurrency int
 }
 
 type InitialParseStage struct {
@@ -181,17 +188,21 @@ func (st EventSinkStage) handleError(err error) {
 	st.syncer.Close()
 }
 
-func NewDisruptorBinlogSyncer(cfg BinlogSyncerConfig) *DisruptorBinlogSyncer {
-	return &DisruptorBinlogSyncer{
-		BinlogSyncer: *NewBinlogSyncer(cfg),
-		Handler:      nil,
+func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableEventHandler) *DisruptorBinlogSyncer {
+	ips := InitialParseStage{}
+	cpss := make([]disruptor.Consumer, 0)
+	ess := EventSinkStage{}
+	result := &DisruptorBinlogSyncer{
+		BinlogSyncer: *NewBinlogSyncer(cfg.BinlogSyncerConfig),
+		Handler:      handler,
 		disruptor: disruptor.New(
-			disruptor.WithCapacity(DisruptorBufferSize),
-			disruptor.WithConsumerGroup(InitialParseStage{}),
-			disruptor.WithConsumerGroup(ConcurrentParseStage{}, ConcurrentParseStage{}, ConcurrentParseStage{}, ConcurrentParseStage{}),
-			disruptor.WithConsumerGroup(EventSinkStage{}),
+			disruptor.WithCapacity(DefaultDisruptorBufferSize),
+			disruptor.WithConsumerGroup(ips),
+			disruptor.WithConsumerGroup(cpss...),
+			disruptor.WithConsumerGroup(ess),
 		),
 	}
+	return result
 }
 
 func (bs *DisruptorBinlogSyncer) run() {
