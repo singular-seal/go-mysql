@@ -45,7 +45,8 @@ type InitialParseStage struct {
 type ConcurrentParseStage struct {
 	num             int64
 	concurrencyMask int64
-	syncer          *DisruptorBinlogSyncer
+	ringBuffer      []*DisruptorEvent
+	parser          *BinlogParser
 }
 type EventSinkStage struct {
 	syncer   *DisruptorBinlogSyncer
@@ -154,11 +155,11 @@ func (st ConcurrentParseStage) Consume(lower, upper int64) {
 		if lower&st.concurrencyMask != st.num {
 			continue
 		}
-		msg := st.syncer.ringBuffer[lower&DisruptorBufferMask]
+		msg := st.ringBuffer[lower&DisruptorBufferMask]
 		if msg.err != nil {
 			continue
 		}
-		msg.err = st.syncer.parser.FullParse(msg.binEvent, msg.data)
+		msg.err = st.parser.FullParse(msg.binEvent, msg.data)
 	}
 }
 
@@ -189,19 +190,49 @@ func (st EventSinkStage) handleError(err error) {
 }
 
 func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableEventHandler) *DisruptorBinlogSyncer {
+	var bufferSize int
+	var concurrency int
+	if cfg.BufferSize > 0 {
+		bufferSize = cfg.BufferSize
+	} else {
+		bufferSize = DefaultDisruptorBufferSize
+	}
+	if cfg.ParseConcurrency > 0 {
+		concurrency = cfg.ParseConcurrency
+	} else {
+		concurrency = DefaultParseConcurrency
+	}
+
 	ips := InitialParseStage{}
-	cpss := make([]disruptor.Consumer, 0)
 	ess := EventSinkStage{}
+
+	rb := make([]*DisruptorEvent, bufferSize)
+	bs := NewBinlogSyncer(cfg.BinlogSyncerConfig)
+	cps := make([]disruptor.Consumer, 0)
+	for i := 0; i < concurrency; i++ {
+		each := ConcurrentParseStage{
+			num:             int64(i),
+			concurrencyMask: int64(concurrency - 1),
+			ringBuffer:      rb,
+			parser:          bs.parser,
+		}
+		cps = append(cps, each)
+	}
+
 	result := &DisruptorBinlogSyncer{
-		BinlogSyncer: *NewBinlogSyncer(cfg.BinlogSyncerConfig),
+		BinlogSyncer: *bs,
 		Handler:      handler,
 		disruptor: disruptor.New(
-			disruptor.WithCapacity(DefaultDisruptorBufferSize),
+			disruptor.WithCapacity(int64(bufferSize)),
 			disruptor.WithConsumerGroup(ips),
-			disruptor.WithConsumerGroup(cpss...),
+			disruptor.WithConsumerGroup(cps...),
 			disruptor.WithConsumerGroup(ess),
 		),
+		ringBuffer: rb,
 	}
+
+	ips.syncer = result
+	ess.syncer = result
 	return result
 }
 
@@ -254,4 +285,68 @@ func (bs *DisruptorBinlogSyncer) parseEvent(data []byte) {
 func (bs *DisruptorBinlogSyncer) Close() {
 	bs.disruptor.Close()
 	bs.BinlogSyncer.Close()
+}
+
+// StartSync starts syncing from the `pos` position.
+func (bs *DisruptorBinlogSyncer) StartSync(pos Position) error {
+	bs.cfg.Logger.Infof("begin to sync binlog from position %s", pos)
+
+	bs.m.Lock()
+	defer bs.m.Unlock()
+
+	if bs.running {
+		return errors.Trace(errSyncRunning)
+	}
+
+	if err := bs.prepareSyncPos(pos); err != nil {
+		return errors.Trace(err)
+	}
+
+	bs.running = true
+
+	bs.wg.Add(1)
+	go bs.run()
+
+	return nil
+}
+
+// StartSyncGTID starts syncing from the `gset` GTIDSet.
+func (bs *DisruptorBinlogSyncer) StartSyncGTID(gset GTIDSet) error {
+	bs.cfg.Logger.Infof("begin to sync binlog from GTID set %s", gset)
+
+	bs.prevGset = gset
+
+	bs.m.Lock()
+	defer bs.m.Unlock()
+
+	if bs.running {
+		return errors.Trace(errSyncRunning)
+	}
+
+	// establishing network connection here and will start getting binlog events from "gset + 1", thus until first
+	// MariadbGTIDEvent/GTIDEvent event is received - we effectively do not have a "current GTID"
+	bs.currGset = nil
+
+	if err := bs.prepare(); err != nil {
+		return errors.Trace(err)
+	}
+
+	var err error
+	switch bs.cfg.Flavor {
+	case MariaDBFlavor:
+		err = bs.writeBinlogDumpMariadbGTIDCommand(gset)
+	default:
+		// default use MySQL
+		err = bs.writeBinlogDumpMysqlGTIDCommand(gset)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	bs.running = true
+
+	bs.wg.Add(1)
+	go bs.run()
+	return nil
 }
