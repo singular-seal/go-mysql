@@ -27,7 +27,7 @@ type ClosableEventHandler interface {
 }
 
 type DisruptorBinlogSyncer struct {
-	BinlogSyncer
+	*BinlogSyncer
 	Handler    ClosableEventHandler
 	disruptor  disruptor.Disruptor
 	ringBuffer []*DisruptorEvent
@@ -220,7 +220,7 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 	}
 
 	result := &DisruptorBinlogSyncer{
-		BinlogSyncer: *bs,
+		BinlogSyncer: bs,
 		Handler:      handler,
 		disruptor: disruptor.New(
 			disruptor.WithCapacity(int64(bufferSize)),
