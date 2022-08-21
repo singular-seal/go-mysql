@@ -174,7 +174,7 @@ func (st EventSinkStage) Consume(lower, upper int64) {
 			st.handleError(msg.err)
 			return
 		}
-		err := st.syncer.Handler(msg)
+		err := st.syncer.Handler.Handle(msg.binEvent)
 		if err != nil {
 			st.handleError(msg.err)
 			return
@@ -238,6 +238,10 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 
 func (bs *DisruptorBinlogSyncer) run() {
 	defer func() {
+		if e := recover(); e != nil {
+			bs.cfg.Logger.Errorf("Err: %v\n Stack: %s", e, Pstack())
+			bs.Handler.Close()
+		}
 		bs.wg.Done()
 	}()
 
@@ -245,12 +249,14 @@ func (bs *DisruptorBinlogSyncer) run() {
 		data, err := bs.c.ReadPacket()
 		select {
 		case <-bs.ctx.Done():
+			bs.Handler.Close()
 			return
 		default:
 		}
 
 		if err != nil {
 			bs.cfg.Logger.Error(err)
+			bs.Handler.Close()
 			return
 
 			// removed the retry logic here
@@ -262,6 +268,7 @@ func (bs *DisruptorBinlogSyncer) run() {
 		case ERR_HEADER:
 			err = bs.c.HandleErrorPacket(data)
 			bs.cfg.Logger.Error(err)
+			bs.Handler.Close()
 			return
 		case EOF_HEADER:
 			// refer to https://dev.mysql.com/doc/internals/en/com-binlog-dump.html#binlog-dump-non-block
