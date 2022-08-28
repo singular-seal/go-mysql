@@ -40,7 +40,8 @@ type DisruptorBinlogSyncerConfig struct {
 }
 
 type SyncParseStage struct {
-	syncer *DisruptorBinlogSyncer
+	// don't have reference type so use slice instead
+	syncer []*DisruptorBinlogSyncer
 }
 type ConcurrentParseStage struct {
 	num             int64
@@ -49,12 +50,12 @@ type ConcurrentParseStage struct {
 	parser          *BinlogParser
 }
 type EventSinkStage struct {
-	syncer   *DisruptorBinlogSyncer
+	syncer   []*DisruptorBinlogSyncer
 	hasError bool
 }
 
 func (st SyncParseStage) Consume(lower, upper int64) {
-	syncer := st.syncer
+	syncer := st.syncer[0]
 
 	getCurrentGtidSet := func() GTIDSet {
 		if syncer.currGset == nil {
@@ -78,7 +79,7 @@ func (st SyncParseStage) Consume(lower, upper int64) {
 		msg.data = msg.data[1:]
 
 		needACK := false
-		if st.syncer.cfg.SemiSyncEnabled && (msg.data[0] == SemiSyncIndicator) {
+		if syncer.cfg.SemiSyncEnabled && (msg.data[0] == SemiSyncIndicator) {
 			needACK = msg.data[1] == 0x01
 			//skip semi sync header
 			msg.data = msg.data[2:]
@@ -130,6 +131,7 @@ func (st SyncParseStage) Consume(lower, upper int64) {
 		select {
 		case <-syncer.ctx.Done():
 			needStop = true
+		default:
 		}
 
 		if needACK {
@@ -169,12 +171,12 @@ func (st EventSinkStage) Consume(lower, upper int64) {
 			return
 		}
 
-		msg := st.syncer.ringBuffer[lower&DisruptorBufferMask]
+		msg := st.syncer[0].ringBuffer[lower&DisruptorBufferMask]
 		if msg.err != nil {
 			st.handleError(msg.err)
 			return
 		}
-		err := st.syncer.Handler.Handle(msg.binEvent)
+		err := st.syncer[0].Handler.Handle(msg.binEvent)
 		if err != nil {
 			st.handleError(msg.err)
 			return
@@ -184,9 +186,9 @@ func (st EventSinkStage) Consume(lower, upper int64) {
 
 func (st EventSinkStage) handleError(err error) {
 	st.hasError = true
-	st.syncer.cfg.Logger.Errorf("get error %v, will exit", err)
-	st.syncer.Handler.Close()
-	st.syncer.Close()
+	st.syncer[0].cfg.Logger.Errorf("get error %v, will exit", err)
+	st.syncer[0].Handler.Close()
+	st.syncer[0].Close()
 }
 
 func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableEventHandler) *DisruptorBinlogSyncer {
@@ -203,8 +205,13 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 		concurrency = DefaultParseConcurrency
 	}
 
-	ips := SyncParseStage{}
-	ess := EventSinkStage{}
+	syncPlaceholder := make([]*DisruptorBinlogSyncer, 1)
+	ips := SyncParseStage{
+		syncer: syncPlaceholder,
+	}
+	ess := EventSinkStage{
+		syncer: syncPlaceholder,
+	}
 
 	rb := make([]*DisruptorEvent, bufferSize)
 	bs := NewBinlogSyncer(cfg.BinlogSyncerConfig)
@@ -231,8 +238,7 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 		ringBuffer: rb,
 	}
 
-	ips.syncer = result
-	ess.syncer = result
+	syncPlaceholder[0] = result
 	return result
 }
 
