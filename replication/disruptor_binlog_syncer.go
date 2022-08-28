@@ -39,7 +39,7 @@ type DisruptorBinlogSyncerConfig struct {
 	ParseConcurrency int
 }
 
-type InitialParseStage struct {
+type SyncParseStage struct {
 	syncer *DisruptorBinlogSyncer
 }
 type ConcurrentParseStage struct {
@@ -53,7 +53,7 @@ type EventSinkStage struct {
 	hasError bool
 }
 
-func (st InitialParseStage) Consume(lower, upper int64) {
+func (st SyncParseStage) Consume(lower, upper int64) {
 	syncer := st.syncer
 
 	getCurrentGtidSet := func() GTIDSet {
@@ -184,7 +184,7 @@ func (st EventSinkStage) Consume(lower, upper int64) {
 
 func (st EventSinkStage) handleError(err error) {
 	st.hasError = true
-	st.syncer.cfg.Logger.Errorf("get error, will exit", err)
+	st.syncer.cfg.Logger.Errorf("get error %v, will exit", err)
 	st.syncer.Handler.Close()
 	st.syncer.Close()
 }
@@ -203,7 +203,7 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 		concurrency = DefaultParseConcurrency
 	}
 
-	ips := InitialParseStage{}
+	ips := SyncParseStage{}
 	ess := EventSinkStage{}
 
 	rb := make([]*DisruptorEvent, bufferSize)
@@ -313,6 +313,7 @@ func (bs *DisruptorBinlogSyncer) StartSync(pos Position) error {
 
 	bs.wg.Add(1)
 	go bs.run()
+	go bs.disruptor.Read()
 
 	return nil
 }
@@ -355,5 +356,6 @@ func (bs *DisruptorBinlogSyncer) StartSyncGTID(gset GTIDSet) error {
 
 	bs.wg.Add(1)
 	go bs.run()
+	go bs.disruptor.Read()
 	return nil
 }
