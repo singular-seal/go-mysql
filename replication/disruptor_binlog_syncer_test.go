@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/google/uuid"
 	. "github.com/pingcap/check"
-	"sync"
 	"testing"
 	"time"
 )
@@ -20,8 +18,9 @@ type testEventHandler struct {
 }
 
 func (h *testEventHandler) Handle(e *BinlogEvent) error {
-	h.events = append(h.events, e)
-	fmt.Println(e)
+	if e.Header.EventType != HEARTBEAT_EVENT {
+		h.events = append(h.events, e)
+	}
 	return nil
 }
 
@@ -31,8 +30,6 @@ func (h *testEventHandler) Close() {
 type testDisruptorSyncerSuite struct {
 	b *DisruptorBinlogSyncer
 	c *client.Conn
-
-	wg sync.WaitGroup
 }
 
 var _ = Suite(&testDisruptorSyncerSuite{})
@@ -133,21 +130,51 @@ func (t *testDisruptorSyncerSuite) TestMysqlBinlogSync(c *C) {
 		c.Skip("GTID mode is not ON")
 	}
 
-	r, err = t.c.Execute("SHOW GLOBAL VARIABLES LIKE 'SERVER_UUID'")
+	r, err = t.c.Execute("SHOW MASTER STATUS")
 	c.Assert(err, IsNil)
 
-	var masterUuid uuid.UUID
-	if s, _ := r.GetString(0, 1); len(s) > 0 && s != "NONE" {
-		masterUuid, err = uuid.Parse(s)
+	var s string
+	if s, _ = r.GetString(0, 4); len(s) > 0 && s != "NONE" {
 		c.Assert(err, IsNil)
 	}
-
-	set, _ := mysql.ParseMysqlGTIDSet(fmt.Sprintf("%s:%d-%d", masterUuid.String(), 1, 2))
+	set, _ := mysql.ParseMysqlGTIDSet(s)
 
 	err = t.b.StartSyncGTID(set)
 	c.Assert(err, IsNil)
 
 	t.createTestMysqlBinlogSyncData(c)
+	time.Sleep(time.Second)
+	t.testData(c)
+}
 
-	time.Sleep(100 * time.Minute)
+func (t *testDisruptorSyncerSuite) testData(c *C) {
+	posOrder := true
+	currentPos := uint32(0)
+	h := t.b.Handler.(*testEventHandler)
+	for _, event := range h.events {
+		if event.Header.LogPos < currentPos {
+			posOrder = false
+		} else {
+			currentPos = event.Header.LogPos
+		}
+	}
+	c.Assert(posOrder, IsTrue)
+
+	transCount := 0
+	transOrder := true
+	currTran := int64(0)
+	for _, event := range h.events {
+		if event.Header.EventType == GTID_EVENT {
+			transCount++
+			ge := event.Event.(*GTIDEvent)
+			if ge.GNO < currTran {
+				transOrder = false
+			} else {
+				currTran = ge.GNO
+			}
+
+		}
+	}
+	c.Assert(transCount, Equals, 5)
+	c.Assert(transOrder, IsTrue)
 }
