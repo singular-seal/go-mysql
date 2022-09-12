@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"hash/crc32"
 	"io"
 	"os"
@@ -402,7 +403,7 @@ func (p *BinlogParser) QuickParse(data []byte) (*BinlogEvent, []byte, error) {
 				WRITE_ROWS_EVENTv2,
 				UPDATE_ROWS_EVENTv2,
 				DELETE_ROWS_EVENTv2:
-				e = p.newRowsEvent(h)
+				e = p.newRowsEventWithTable(h, data)
 				skipDecode = true
 			case ROWS_QUERY_EVENT:
 				e = &RowsQueryEvent{}
@@ -538,5 +539,13 @@ func (p *BinlogParser) newRowsEvent(h *EventHeader) *RowsEvent {
 		e.Version = 2
 	}
 
+	return e
+}
+
+// newRowsEventWithTable Create new rows event and fill table info
+func (p *BinlogParser) newRowsEventWithTable(h *EventHeader, data []byte) *RowsEvent {
+	e := p.newRowsEvent(h)
+	e.TableID = mysql.FixedLengthInt(data[0:e.tableIDSize])
+	e.Table = e.tables[e.TableID]
 	return e
 }
