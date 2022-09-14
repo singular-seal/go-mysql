@@ -37,11 +37,13 @@ type DisruptorBinlogSyncerConfig struct {
 	BinlogSyncerConfig
 	BufferSize       int
 	ParseConcurrency int
+	SaveGTIDInterval int
 }
 
 type SyncParseStage struct {
 	// don't have reference type so use slice instead
-	syncer []*DisruptorBinlogSyncer
+	syncer           []*DisruptorBinlogSyncer
+	saveGTIDInterval int
 }
 type ConcurrentParseStage struct {
 	num             int64
@@ -56,6 +58,7 @@ type EventSinkStage struct {
 
 func (st SyncParseStage) Consume(lower, upper int64) {
 	syncer := st.syncer[0]
+	saveGtidCounter := 0
 
 	getCurrentGtidSet := func() GTIDSet {
 		if syncer.currGset == nil {
@@ -122,9 +125,18 @@ func (st SyncParseStage) Consume(lower, upper int64) {
 				continue
 			}
 		case *XIDEvent:
-			event.GSet = getCurrentGtidSet()
+			if st.saveGTIDInterval > 1 {
+				saveGtidCounter++
+				if saveGtidCounter == st.saveGTIDInterval {
+					saveGtidCounter = 0
+					event.GSet = getCurrentGtidSet()
+				}
+			} else {
+				event.GSet = getCurrentGtidSet()
+			}
 		case *QueryEvent:
-			event.GSet = getCurrentGtidSet()
+			//don't need it on query event so remove temporary
+			//event.GSet = getCurrentGtidSet()
 		}
 
 		needStop := false
@@ -207,7 +219,8 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 
 	syncPlaceholder := make([]*DisruptorBinlogSyncer, 1)
 	ips := SyncParseStage{
-		syncer: syncPlaceholder,
+		syncer:           syncPlaceholder,
+		saveGTIDInterval: cfg.SaveGTIDInterval,
 	}
 	ess := EventSinkStage{
 		syncer: syncPlaceholder,
