@@ -139,24 +139,12 @@ func (st SyncParseStage) Consume(lower, upper int64) {
 			//event.GSet = getCurrentGtidSet()
 		}
 
-		needStop := false
-		select {
-		case <-syncer.ctx.Done():
-			needStop = true
-		default:
-		}
-
 		if needACK {
 			err := syncer.replySemiSyncACK(syncer.nextPos)
 			if err != nil {
 				msg.err = errors.Trace(err)
 				continue
 			}
-		}
-
-		if needStop {
-			msg.err = errors.New("sync is been closing...")
-			continue
 		}
 
 		msg.binEvent = e
