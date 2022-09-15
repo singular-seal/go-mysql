@@ -72,8 +72,8 @@ func (st SyncParseStage) Consume(lower, upper int64) {
 		if syncer.currGset == nil {
 			syncer.currGset = syncer.prevGset.Clone()
 		}
-		//err := syncer.currGset.Update(gtid)
-		return nil
+		err := syncer.currGset.Update(gtid)
+		return err
 	}
 
 	for ; lower <= upper; lower++ {
