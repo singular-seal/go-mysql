@@ -384,6 +384,7 @@ func (p *BinlogParser) QuickParse(data []byte) (*BinlogEvent, []byte, error) {
 				skipDecode = true
 			case XID_EVENT:
 				e = &XIDEvent{}
+				skipDecode = true
 			case TABLE_MAP_EVENT:
 				te := &TableMapEvent{
 					flavor: p.flavor,
@@ -409,8 +410,10 @@ func (p *BinlogParser) QuickParse(data []byte) (*BinlogEvent, []byte, error) {
 				e = &RowsQueryEvent{}
 			case GTID_EVENT:
 				e = &GTIDEvent{}
+				skipDecode = true
 			case ANONYMOUS_GTID_EVENT:
 				e = &GTIDEvent{}
+				skipDecode = true
 			case BEGIN_LOAD_QUERY_EVENT:
 				e = &BeginLoadQueryEvent{}
 			case EXECUTE_LOAD_QUERY_EVENT:
