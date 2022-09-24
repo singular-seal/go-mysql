@@ -22,7 +22,8 @@ type DisruptorEvent struct {
 }
 
 type ClosableEventHandler interface {
-	Handle(*BinlogEvent) error
+	Handle(event *BinlogEvent) error
+	HandleError(err error)
 	Close()
 }
 
@@ -178,13 +179,14 @@ func (st EventSinkStage) Consume(lower, upper int64) {
 		}
 		err := st.syncer[0].Handler.Handle(msg.binEvent)
 		if err != nil {
-			st.handleError(msg.err)
+			st.handleError(err)
 			return
 		}
 	}
 }
 
 func (st EventSinkStage) handleError(err error) {
+	st.syncer[0].Handler.HandleError(err)
 	st.hasError = true
 	st.syncer[0].cfg.Logger.Errorf("get error %v, will exit", err)
 	st.syncer[0].Handler.Close()
@@ -243,11 +245,16 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 	return result
 }
 
+func informAndClose(handler ClosableEventHandler, err error) {
+	handler.HandleError(err)
+	handler.Close()
+}
+
 func (bs *DisruptorBinlogSyncer) run() {
 	defer func() {
 		if e := recover(); e != nil {
 			bs.cfg.Logger.Errorf("Err: %v\n Stack: %s", e, Pstack())
-			bs.Handler.Close()
+			informAndClose(bs.Handler, fmt.Errorf("err: %v", e))
 		}
 		bs.wg.Done()
 	}()
@@ -263,7 +270,7 @@ func (bs *DisruptorBinlogSyncer) run() {
 
 		if err != nil {
 			bs.cfg.Logger.Error(err)
-			bs.Handler.Close()
+			informAndClose(bs.Handler, err)
 			return
 
 			// removed the retry logic here
@@ -275,7 +282,7 @@ func (bs *DisruptorBinlogSyncer) run() {
 		case ERR_HEADER:
 			err = bs.c.HandleErrorPacket(data)
 			bs.cfg.Logger.Error(err)
-			bs.Handler.Close()
+			informAndClose(bs.Handler, err)
 			return
 		case EOF_HEADER:
 			// refer to https://dev.mysql.com/doc/internals/en/com-binlog-dump.html#binlog-dump-non-block

@@ -24,6 +24,9 @@ func (h *testEventHandler) Handle(e *BinlogEvent) error {
 	return nil
 }
 
+func (h *testEventHandler) HandleError(err error) {
+}
+
 func (h *testEventHandler) Close() {
 }
 
