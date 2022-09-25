@@ -38,13 +38,14 @@ type DisruptorBinlogSyncerConfig struct {
 	BinlogSyncerConfig
 	BufferSize       int
 	ParseConcurrency int
-	SaveGTIDInterval int
+	// Don't manage gtid set inside go-mysql. 
+	SkipGTIDSetManagement bool
 }
 
 type SyncParseStage struct {
 	// don't have reference type so use slice instead
-	syncer           []*DisruptorBinlogSyncer
-	saveGTIDInterval int
+	syncer                []*DisruptorBinlogSyncer
+	skipGTIDSetManagement bool
 }
 type ConcurrentParseStage struct {
 	num             int64
@@ -59,7 +60,6 @@ type EventSinkStage struct {
 
 func (st SyncParseStage) Consume(lower, upper int64) {
 	syncer := st.syncer[0]
-	saveGtidCounter := 0
 
 	getCurrentGtidSet := func() GTIDSet {
 		if syncer.currGset == nil {
@@ -110,34 +110,33 @@ func (st SyncParseStage) Consume(lower, upper int64) {
 				break
 			}
 			u, _ := uuid.FromBytes(event.SID)
-			err := advanceCurrentGtidSet(fmt.Sprintf("%s:%d", u.String(), event.GNO))
-			if err != nil {
-				msg.err = errors.Trace(err)
-				continue
+			if !st.skipGTIDSetManagement {
+				err := advanceCurrentGtidSet(fmt.Sprintf("%s:%d", u.String(), event.GNO))
+				if err != nil {
+					msg.err = errors.Trace(err)
+					continue
+				}
 			}
 		case *MariadbGTIDEvent:
 			if syncer.prevGset == nil {
 				break
 			}
 			GTID := event.GTID
-			err := advanceCurrentGtidSet(fmt.Sprintf("%d-%d-%d", GTID.DomainID, GTID.ServerID, GTID.SequenceNumber))
-			if err != nil {
-				msg.err = errors.Trace(err)
-				continue
+			if !st.skipGTIDSetManagement {
+				err := advanceCurrentGtidSet(fmt.Sprintf("%d-%d-%d", GTID.DomainID, GTID.ServerID, GTID.SequenceNumber))
+				if err != nil {
+					msg.err = errors.Trace(err)
+					continue
+				}
 			}
 		case *XIDEvent:
-			if st.saveGTIDInterval > 1 {
-				saveGtidCounter++
-				if saveGtidCounter == st.saveGTIDInterval {
-					saveGtidCounter = 0
-					event.GSet = getCurrentGtidSet()
-				}
-			} else {
+			if !st.skipGTIDSetManagement {
 				event.GSet = getCurrentGtidSet()
 			}
 		case *QueryEvent:
-			//don't need it on query event so remove temporary
-			//event.GSet = getCurrentGtidSet()
+			if !st.skipGTIDSetManagement {
+				event.GSet = getCurrentGtidSet()
+			}
 		}
 
 		if needACK {
@@ -209,8 +208,8 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 
 	syncPlaceholder := make([]*DisruptorBinlogSyncer, 1)
 	ips := SyncParseStage{
-		syncer:           syncPlaceholder,
-		saveGTIDInterval: cfg.SaveGTIDInterval,
+		syncer:                syncPlaceholder,
+		skipGTIDSetManagement: cfg.SkipGTIDSetManagement,
 	}
 	ess := EventSinkStage{
 		syncer: syncPlaceholder,
