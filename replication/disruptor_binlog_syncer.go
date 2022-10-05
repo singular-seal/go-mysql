@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/smartystreets-prototypes/go-disruptor"
+	"time"
 )
 
 const (
@@ -38,7 +39,7 @@ type DisruptorBinlogSyncerConfig struct {
 	BinlogSyncerConfig
 	BufferSize       int
 	ParseConcurrency int
-	// Don't manage gtid set inside go-mysql. 
+	// Don't manage gtid set inside go-mysql.
 	SkipGTIDSetManagement bool
 }
 
@@ -273,6 +274,11 @@ func (bs *DisruptorBinlogSyncer) run() {
 			return
 
 			// removed the retry logic here
+		}
+
+		//set read timeout
+		if bs.cfg.ReadTimeout > 0 {
+			_ = bs.c.SetReadDeadline(time.Now().Add(bs.cfg.ReadTimeout))
 		}
 
 		switch data[0] {
