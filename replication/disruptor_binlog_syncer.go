@@ -41,6 +41,7 @@ type DisruptorBinlogSyncerConfig struct {
 	ParseConcurrency int
 	// Don't manage gtid set inside go-mysql.
 	SkipGTIDSetManagement bool
+	WriteBlockParkTime    time.Duration
 }
 
 type SyncParseStage struct {
@@ -234,6 +235,7 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 		Handler:      handler,
 		disruptor: disruptor.New(
 			disruptor.WithCapacity(int64(bufferSize)),
+			disruptor.WithWriteBlockParkTime(cfg.WriteBlockParkTime),
 			disruptor.WithConsumerGroup(ips),
 			disruptor.WithConsumerGroup(cps...),
 			disruptor.WithConsumerGroup(ess),
