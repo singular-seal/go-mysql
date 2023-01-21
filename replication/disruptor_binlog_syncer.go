@@ -258,7 +258,7 @@ func (bs *DisruptorBinlogSyncer) run() {
 			bs.cfg.Logger.Errorf("Err: %v\n Stack: %s", e, Pstack())
 			informAndClose(bs.Handler, fmt.Errorf("err: %v", e))
 		}
-		bs.wg.Done()
+		//bs.wg.Done()
 	}()
 
 	for {
@@ -332,7 +332,7 @@ func (bs *DisruptorBinlogSyncer) StartSync(pos Position) error {
 
 	bs.running = true
 
-	bs.wg.Add(1)
+	//bs.wg.Add(1)
 	go bs.run()
 	go bs.disruptor.Read()
 
@@ -375,7 +375,7 @@ func (bs *DisruptorBinlogSyncer) StartSyncGTID(gset GTIDSet) error {
 
 	bs.running = true
 
-	bs.wg.Add(1)
+	//bs.wg.Add(1)
 	go bs.run()
 	go bs.disruptor.Read()
 	return nil
