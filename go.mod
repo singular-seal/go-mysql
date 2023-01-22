@@ -2,7 +2,7 @@ module github.com/go-mysql-org/go-mysql
 
 go 1.16
 
-replace github.com/smartystreets-prototypes/go-disruptor => github.com/singular-seal/go-disruptor v0.0.1
+replace github.com/smartystreets-prototypes/go-disruptor => github.com/singular-seal/go-disruptor v0.0.4
 
 require (
 	github.com/BurntSushi/toml v0.3.1

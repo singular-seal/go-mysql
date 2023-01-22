@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	DefaultDisruptorBufferSize = 8192
-	DefaultParseConcurrency    = 4
-	DisruptorBufferMask        = DefaultDisruptorBufferSize - 1
-	DisruptorReservations      = 1
+	DefaultDisruptorBufferSize     = 8192
+	DefaultParseConcurrency        = 4
+	DisruptorBufferMask            = DefaultDisruptorBufferSize - 1
+	DisruptorReservations          = 1
+	DefaultDisruptorWriteBlockTime = time.Millisecond
 )
 
 type DisruptorEvent struct {
@@ -30,9 +31,10 @@ type ClosableEventHandler interface {
 
 type DisruptorBinlogSyncer struct {
 	*BinlogSyncer
-	Handler    ClosableEventHandler
-	disruptor  disruptor.Disruptor
-	ringBuffer []*DisruptorEvent
+	Handler        ClosableEventHandler
+	disruptor      disruptor.Disruptor
+	ringBuffer     []*DisruptorEvent
+	writeBlockTime time.Duration
 }
 
 type DisruptorBinlogSyncerConfig struct {
@@ -197,6 +199,7 @@ func (st EventSinkStage) handleError(err error) {
 func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableEventHandler) *DisruptorBinlogSyncer {
 	var bufferSize int
 	var concurrency int
+	var writeBlockTime time.Duration
 	if cfg.BufferSize > 0 {
 		bufferSize = cfg.BufferSize
 	} else {
@@ -206,6 +209,11 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 		concurrency = cfg.ParseConcurrency
 	} else {
 		concurrency = DefaultParseConcurrency
+	}
+	if cfg.WriteBlockParkTime > 0 {
+		writeBlockTime = cfg.WriteBlockParkTime
+	} else {
+		writeBlockTime = DefaultDisruptorWriteBlockTime
 	}
 
 	syncPlaceholder := make([]*DisruptorBinlogSyncer, 1)
@@ -235,12 +243,13 @@ func NewDisruptorBinlogSyncer(cfg DisruptorBinlogSyncerConfig, handler ClosableE
 		Handler:      handler,
 		disruptor: disruptor.New(
 			disruptor.WithCapacity(int64(bufferSize)),
-			disruptor.WithWriteBlockParkTime(cfg.WriteBlockParkTime),
+			disruptor.WithWriteBlockParkTime(writeBlockTime),
 			disruptor.WithConsumerGroup(ips),
 			disruptor.WithConsumerGroup(cps...),
 			disruptor.WithConsumerGroup(ess),
 		),
-		ringBuffer: rb,
+		ringBuffer:     rb,
+		writeBlockTime: writeBlockTime,
 	}
 
 	syncPlaceholder[0] = result
@@ -305,7 +314,22 @@ func (bs *DisruptorBinlogSyncer) run() {
 }
 
 func (bs *DisruptorBinlogSyncer) parseEvent(data []byte) {
-	sequence := bs.disruptor.Reserve(DisruptorReservations)
+	var sequence int64
+	var ok bool
+	if sequence, ok = bs.disruptor.TryReserve(DisruptorReservations); ok {
+		bs.ringBuffer[sequence&DisruptorBufferMask] = &DisruptorEvent{data: data}
+		bs.disruptor.Commit(sequence, sequence)
+		return
+	}
+
+	for !ok {
+		// avoid blocking, parseEvent shouldn't be entered again after bs.isClosed
+		if bs.isClosed() {
+			return
+		}
+		time.Sleep(bs.writeBlockTime)
+		sequence, ok = bs.disruptor.TryReserve(DisruptorReservations)
+	}
 	bs.ringBuffer[sequence&DisruptorBufferMask] = &DisruptorEvent{data: data}
 	bs.disruptor.Commit(sequence, sequence)
 }
