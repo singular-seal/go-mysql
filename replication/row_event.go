@@ -886,12 +886,14 @@ func (e *RowsEvent) DecodeHeader(data []byte) (int, error) {
 	}
 
 	var ok bool
-	e.Table, ok = e.tables[e.TableID]
-	if !ok {
-		if len(e.tables) > 0 {
-			return 0, errors.Errorf("invalid table id %d, no corresponding table map event", e.TableID)
-		} else {
-			return 0, errors.Annotatef(errMissingTableMapEvent, "table id %d", e.TableID)
+	if e.Table == nil {
+		e.Table, ok = e.tables[e.TableID]
+		if !ok {
+			if len(e.tables) > 0 {
+				return 0, errors.Errorf("invalid table id %d, no corresponding table map event", e.TableID)
+			} else {
+				return 0, errors.Annotatef(errMissingTableMapEvent, "table id %d", e.TableID)
+			}
 		}
 	}
 	return pos, nil
